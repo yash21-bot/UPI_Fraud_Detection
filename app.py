@@ -6,20 +6,20 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Load model and feature list
+# --- Load model and required features ---
 model = joblib.load("xgboost_model.pkl")
-model_features = joblib.load("model_features.pkl")  # Ensures column alignment
+model_features = joblib.load("model_features.pkl")  # Ensures feature alignment
 
-# UPI ID Hash Function
+# --- UPI ID Hash Function ---
 def hash_upi(upi):
     return int(hashlib.sha256(str(upi).encode('utf-8')).hexdigest(), 16) % (10 ** 8)
 
-# Streamlit page setup
+# --- Page Setup ---
 st.set_page_config(page_title="UPI Fraud Detection", layout="wide")
 st.title("🛡️ UPI Fraud Detection System")
 st.markdown("Upload a transaction CSV file or enter data manually to detect potential frauds using the trained XGBoost model.")
 
-# Data Preprocessing
+# --- Preprocessing Function ---
 def preprocess(df):
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     df['Hour'] = df['Timestamp'].dt.hour
@@ -45,7 +45,7 @@ def preprocess(df):
             df[col] = 0
     return df[model_features]
 
-# CSV Upload Section
+# --- CSV Upload Section ---
 st.header("📤 Upload Transaction CSV")
 uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
@@ -64,6 +64,9 @@ if uploaded_file:
         df['Predicted_Status'] = y_pred
         df['Predicted_Status'] = df['Predicted_Status'].map({0: 'SUCCESS', 1: 'FAILED'})
 
+        # Save for chatbot access
+        st.session_state["prediction_df"] = df
+
         st.subheader("📊 Prediction Results")
         st.dataframe(df[['Amount (INR)', 'Sender UPI ID', 'Receiver UPI ID', 'Predicted_Status']])
 
@@ -78,7 +81,7 @@ if uploaded_file:
     except Exception as e:
         st.error(f"❌ Error processing data: {e}")
 
-# Manual Input Section
+# --- Manual Input Section ---
 st.markdown("---")
 st.subheader("📝 Manually Enter Transaction Details")
 
@@ -122,7 +125,7 @@ with st.form("manual_form"):
                 'Receiver_UPI_Code': receiver_hash,
             }
 
-            # Add dummy-encoded provider features
+            # One-hot encode sender/receiver providers
             for col in model_features:
                 if col.startswith('Sender_Provider_'):
                     input_dict[col] = 1 if col == f"Sender_Provider_{sender_provider}" else 0
@@ -131,7 +134,7 @@ with st.form("manual_form"):
 
             input_df = pd.DataFrame([input_dict])
 
-            # Ensure all columns present
+            # Ensure all model features are present
             for col in model_features:
                 if col not in input_df.columns:
                     input_df[col] = 0
@@ -144,3 +147,60 @@ with st.form("manual_form"):
 
         except Exception as e:
             st.error(f"❌ Error in manual prediction: {e}")
+
+# --- 🤖 Chatbot Assistant Section ---
+st.markdown("---")
+st.header("🤖 Fraud Detection Assistant")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display message history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# Input from user
+if prompt := st.chat_input("Ask me anything about the system..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    response = ""
+    
+    if "fraud" in prompt.lower():
+        response = "Fraud is detected based on unusual patterns like high amount, unknown UPI IDs, weekend usage, and night-time transactions."
+    
+    elif "upload" in prompt.lower():
+        response = "To upload data, scroll to the '📤 Upload Transaction CSV' section and select your .csv file."
+
+    elif "how it works" in prompt.lower() or "model" in prompt.lower():
+        response = "We use an XGBoost ML model trained on transaction data to classify whether a transaction is likely to be fraudulent."
+
+    elif "status" in prompt.lower():
+        df_pred = st.session_state.get("prediction_df")
+        if df_pred is None:
+            response = "Please upload and analyze a transaction CSV first."
+        else:
+            found = False
+            for _, row in df_pred.iterrows():
+                if (
+                    str(int(row["Amount (INR)"])) in prompt
+                    and row["Sender UPI ID"].lower() in prompt.lower()
+                ):
+                    status = row["Predicted_Status"]
+                    response = (
+                        f"Transaction of ₹{row['Amount (INR)']} from **{row['Sender UPI ID']}** "
+                        f"to **{row['Receiver UPI ID']}** is **{status}**."
+                    )
+                    found = True
+                    break
+            if not found:
+                response = "Couldn't find a matching transaction. Try mentioning both amount and sender UPI ID."
+
+    else:
+        response = "I'm here to assist! Ask about uploading files, how fraud is detected, or the status of a transaction."
+
+    st.session_state.messages.append({"role": "assistant", "content": response})
+    with st.chat_message("assistant"):
+        st.markdown(response)
