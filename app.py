@@ -6,21 +6,48 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Load model
+# Load model and feature list
 model = joblib.load("xgboost_model.pkl")
+model_features = joblib.load("model_features.pkl")  # Ensures column alignment
 
-st.set_page_config(page_title="UPI Fraud Detection", layout="wide")
-st.title("🛡️ UPI Fraud Detection System")
-st.markdown("Upload a transaction CSV file or enter data manually to detect potential frauds using the trained XGBoost model.")
-
-# ----------------------------------------
 # UPI ID Hash Function
 def hash_upi(upi):
     return int(hashlib.sha256(str(upi).encode('utf-8')).hexdigest(), 16) % (10 ** 8)
 
-# ----------------------------------------
+# Streamlit page setup
+st.set_page_config(page_title="UPI Fraud Detection", layout="wide")
+st.title("🛡️ UPI Fraud Detection System")
+st.markdown("Upload a transaction CSV file or enter data manually to detect potential frauds using the trained XGBoost model.")
+
+# Data Preprocessing
+def preprocess(df):
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+    df['Hour'] = df['Timestamp'].dt.hour
+    df['Day'] = df['Timestamp'].dt.day
+    df['Weekday'] = df['Timestamp'].dt.weekday
+    df['Month'] = df['Timestamp'].dt.month
+
+    df['Sender_Provider'] = df['Sender UPI ID'].apply(lambda x: str(x).split('@')[-1])
+    df['Receiver_Provider'] = df['Receiver UPI ID'].apply(lambda x: str(x).split('@')[-1])
+
+    df['Sender_UPI_Code'] = df['Sender UPI ID'].apply(hash_upi)
+    df['Receiver_UPI_Code'] = df['Receiver UPI ID'].apply(hash_upi)
+
+    df['Is_Weekend'] = df['Weekday'].apply(lambda x: 1 if x >= 5 else 0)
+    df['Is_High_Amount'] = df['Amount (INR)'].apply(lambda x: 1 if x > 5000 else 0)
+    df['Time_Segment'] = df['Hour'].apply(lambda x: 0 if x < 6 else 1 if x < 12 else 2 if x < 18 else 3)
+
+    df = pd.get_dummies(df, columns=['Sender_Provider', 'Receiver_Provider'])
+
+    # Ensure all model features are present
+    for col in model_features:
+        if col not in df.columns:
+            df[col] = 0
+    return df[model_features]
+
 # CSV Upload Section
-uploaded_file = st.file_uploader("📤 Upload transaction CSV", type=["csv"])
+st.header("📤 Upload Transaction CSV")
+uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
 if uploaded_file:
     try:
@@ -31,47 +58,27 @@ if uploaded_file:
         df = data.copy()
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
 
-        df['Hour'] = df['Timestamp'].dt.hour
-        df['Day'] = df['Timestamp'].dt.day
-        df['Weekday'] = df['Timestamp'].dt.weekday
-        df['Month'] = df['Timestamp'].dt.month
-        df.drop(columns=['Timestamp', 'Transaction ID', 'Sender Name', 'Receiver Name'], inplace=True)
-
-        df['Sender_Provider'] = df['Sender UPI ID'].apply(lambda x: str(x).split('@')[-1])
-        df['Receiver_Provider'] = df['Receiver UPI ID'].apply(lambda x: str(x).split('@')[-1])
-
-        df = pd.get_dummies(df, columns=['Sender_Provider', 'Receiver_Provider'])
-
-        df['Is_Weekend'] = df['Weekday'].apply(lambda x: 1 if x >= 5 else 0)
-        df['Is_High_Amount'] = df['Amount (INR)'].apply(lambda x: 1 if x > 5000 else 0)
-        df['Time_Segment'] = df['Hour'].apply(lambda x: 0 if x < 6 else 1 if x < 12 else 2 if x < 18 else 3)
-
-        df['Sender_UPI_Code'] = data['Sender UPI ID'].apply(hash_upi)
-        df['Receiver_UPI_Code'] = data['Receiver UPI ID'].apply(hash_upi)
-
-        drop_cols = ['Status', 'Sender UPI ID', 'Receiver UPI ID']
-        X_input = df.drop(columns=[col for col in drop_cols if col in df.columns])
-
+        X_input = preprocess(df)
         y_pred = model.predict(X_input)
-        data['Predicted_Status'] = y_pred
-        data['Predicted_Status'] = data['Predicted_Status'].map({0: 'SUCCESS', 1: 'FAILED'})
+
+        df['Predicted_Status'] = y_pred
+        df['Predicted_Status'] = df['Predicted_Status'].map({0: 'SUCCESS', 1: 'FAILED'})
 
         st.subheader("📊 Prediction Results")
-        st.dataframe(data[['Amount (INR)', 'Sender UPI ID', 'Receiver UPI ID', 'Predicted_Status']])
+        st.dataframe(df[['Amount (INR)', 'Sender UPI ID', 'Receiver UPI ID', 'Predicted_Status']])
 
         st.subheader("🔢 Prediction Summary")
-        st.write(data['Predicted_Status'].value_counts())
+        st.write(df['Predicted_Status'].value_counts())
 
         fig, ax = plt.subplots()
-        sns.countplot(data['Predicted_Status'], palette='coolwarm', ax=ax)
-        ax.set_title("📈 Predicted Transaction Status Distribution")
+        sns.countplot(df['Predicted_Status'], palette='coolwarm', ax=ax)
+        ax.set_title("📈 Prediction Distribution")
         st.pyplot(fig)
 
     except Exception as e:
         st.error(f"❌ Error processing data: {e}")
 
-# ----------------------------------------
-# Manual Input Form
+# Manual Input Section
 st.markdown("---")
 st.subheader("📝 Manually Enter Transaction Details")
 
@@ -79,15 +86,14 @@ with st.form("manual_form"):
     amount = st.number_input("Transaction Amount (INR)", min_value=1.0, value=500.0)
     sender_upi = st.text_input("Sender UPI ID (e.g., user@oksbi)")
     receiver_upi = st.text_input("Receiver UPI ID (e.g., merchant@okhdfcbank)")
-    transaction_date = st.date_input("Transaction Date")
-    transaction_time = st.time_input("Transaction Time")
+    txn_date = st.date_input("Transaction Date")
+    txn_time = st.time_input("Transaction Time")
 
-    submitted = st.form_submit_button("🚀 Predict")
+    submit = st.form_submit_button("🚀 Predict")
 
-    if submitted:
+    if submit:
         try:
-            # Create datetime
-            timestamp = datetime.combine(transaction_date, transaction_time)
+            timestamp = datetime.combine(txn_date, txn_time)
             hour = timestamp.hour
             day = timestamp.day
             weekday = timestamp.weekday()
@@ -103,7 +109,6 @@ with st.form("manual_form"):
             sender_hash = hash_upi(sender_upi)
             receiver_hash = hash_upi(receiver_upi)
 
-            # Match feature columns from training
             input_dict = {
                 'Amount (INR)': amount,
                 'Day': day,
@@ -117,20 +122,25 @@ with st.form("manual_form"):
                 'Receiver_UPI_Code': receiver_hash,
             }
 
-            # Add all known provider combinations with 0
-            providers = ['okhdfcbank', 'okicici', 'oksbi', 'okybl']
-            for prov in providers:
-                input_dict[f'Sender_Provider_{prov}'] = 1 if prov == sender_provider else 0
-                input_dict[f'Receiver_Provider_{prov}'] = 1 if prov == receiver_provider else 0
+            # Add dummy-encoded provider features
+            for col in model_features:
+                if col.startswith('Sender_Provider_'):
+                    input_dict[col] = 1 if col == f"Sender_Provider_{sender_provider}" else 0
+                if col.startswith('Receiver_Provider_'):
+                    input_dict[col] = 1 if col == f"Receiver_Provider_{receiver_provider}" else 0
 
             input_df = pd.DataFrame([input_dict])
-            prediction = model.predict(input_df)[0]
 
-            st.markdown("### 🎯 Prediction Result")
-            if prediction == 1:
-                st.error("❌ Prediction: This transaction is likely **FAILED**.")
-            else:
-                st.success("✅ Prediction: This transaction is likely **SUCCESSFUL**.")
+            # Ensure all columns present
+            for col in model_features:
+                if col not in input_df.columns:
+                    input_df[col] = 0
+            input_df = input_df[model_features]
+
+            prediction = model.predict(input_df)[0]
+            result = "FAILED" if prediction == 1 else "SUCCESS"
+            color = "red" if prediction == 1 else "green"
+            st.markdown(f"### 🧾 Prediction: <span style='color:{color}'>{result}</span>", unsafe_allow_html=True)
 
         except Exception as e:
             st.error(f"❌ Error in manual prediction: {e}")
